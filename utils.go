@@ -5,7 +5,19 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/google/uuid"
 )
+
+func readUUID(r io.Reader) (uuid.UUID, error) {
+	var id uuid.UUID
+	_, err := io.ReadFull(r, id[:])
+	return id, err
+}
+
+func appendUUID(b []byte, id uuid.UUID) []byte {
+	return append(b, id[:]...)
+}
 
 func readString(r *bytes.Reader) (string, error) {
 	length, err := binary.ReadUvarint(r)
@@ -22,10 +34,10 @@ func readString(r *bytes.Reader) (string, error) {
 	return string(buf), nil
 }
 
-func writePacket(w io.Writer, packetID int, payload []byte) error {
+func (c *connection) writePacket(packetID int, payload []byte) error {
 	body := append(binary.AppendUvarint(nil, uint64(packetID)), payload...)
 	frame := append(binary.AppendUvarint(nil, uint64(len(body))), body...)
-	_, err := w.Write(frame)
+	_, err := c.conn.Write(frame)
 	return err
 }
 

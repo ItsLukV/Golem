@@ -129,10 +129,52 @@ func (ms *MinecraftServer) handleConnection(conn net.Conn) {
 }
 
 func (ms *MinecraftServer) handleLogin(c *connection) {
+	if c.state != stateLogin {
+		ms.logger.Errorw("Wrong state, expected login", "state", c.state)
+		return
+	}
 
+	_, body, err := c.readPacket()
+	if err != nil {
+		ms.logger.Errorw("read packet:", err)
+		return
+	}
+	name, err := readString(body)
+	if err != nil {
+		ms.logger.Errorln("read name:", err)
+		return
+	}
+	uuid, err := readUUID(body)
+	if err != nil {
+		ms.logger.Errorln("read uuid:", err)
+		return
+	}
+	ms.logger.Infow("login", "name", name, "uuid", uuid)
+
+	var loginSuccess []byte
+	loginSuccess = appendUUID(loginSuccess, uuid)
+	loginSuccess = appendString(loginSuccess, name)
+	loginSuccess = binary.AppendUvarint(loginSuccess, 0)
+	loginSuccess = appendUUID(loginSuccess, uuid)
+	err = c.writePacket(0x2, loginSuccess)
+	if err != nil {
+		return
+	}
+
+	ackID, _, err := c.readPacket()
+	if err != nil || ackID != 0x03 {
+		ms.logger.Errorw("expected login ack", "got", ackID, "err", err)
+		return
+	}
+	ms.logger.Infow("Login ack", "name", name)
+	c.state = stateConfiguration
 }
 
 func (ms *MinecraftServer) handleStatus(c *connection) {
+	if c.state != stateStatus {
+		ms.logger.Errorw("Wrong state, expected status", "state", c.state)
+		return
+	}
 	for {
 		packetID, p, err := c.readPacket()
 		if err != nil {
@@ -147,7 +189,7 @@ func (ms *MinecraftServer) handleStatus(c *connection) {
 				"description": {"text": "Hello from Go!"}
 			}`
 			payload := appendString(nil, status)
-			if err := writePacket(c.conn, 0x00, payload); err != nil {
+			if err := c.writePacket(0x00, payload); err != nil {
 				return
 			}
 
@@ -158,7 +200,7 @@ func (ms *MinecraftServer) handleStatus(c *connection) {
 			}
 			payload := make([]byte, 8)
 			binary.BigEndian.PutUint64(payload, uint64(nonce))
-			if err := writePacket(c.conn, 0x01, payload); err != nil {
+			if err := c.writePacket(0x01, payload); err != nil {
 				return
 			}
 
