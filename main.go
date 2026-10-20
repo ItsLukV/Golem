@@ -33,14 +33,21 @@ func main() {
 
 	logger := newLogger()
 
-	registries, err := reg.Load()
+	registries, err := reg.LoadRegistries()
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal(err)
 	}
+
+	tags, err := reg.LoadTags(registries)
+	if err != nil {
+		logger.Fatal(err)
+	}
+
 	logger.Infoln("Server listening on :25565")
 	ms := MinecraftServer{
 		logger:     logger,
 		registries: registries,
+		tags:       tags,
 	}
 	for {
 		conn, err := listener.Accept()
@@ -106,6 +113,7 @@ func (c *connection) readPacket() (packetID uint64, body *bytes.Reader, err erro
 type MinecraftServer struct {
 	logger     *zap.SugaredLogger
 	registries []reg.Registry
+	tags       []reg.TagRegistry
 }
 
 func (ms *MinecraftServer) handleConnection(conn net.Conn) {
@@ -259,7 +267,8 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 			if err != nil {
 				return err
 			}
-			if err := c.writePacket(0x0D, binary.AppendUvarint(nil, 0)); err != nil {
+			err = ms.sendTags(c)
+			if err != nil {
 				return err
 			}
 			if err := c.writePacket(0x03, nil); err != nil {
@@ -301,6 +310,24 @@ func (ms *MinecraftServer) sendRegistries(c *connection) error {
 		}
 	}
 	return nil
+}
+
+func (ms *MinecraftServer) sendTags(c *connection) error {
+	var p []byte
+	p = binary.AppendUvarint(p, uint64(len(ms.tags)))
+	for _, r := range ms.tags {
+		p = appendString(p, r.ID)
+		p = binary.AppendUvarint(p, uint64(len(r.Tags)))
+		for name, ids := range r.Tags {
+			p = appendString(p, name)
+			p = binary.AppendUvarint(p, uint64(len(ids)))
+			for _, id := range ids {
+				p = binary.AppendUvarint(p, uint64(id))
+			}
+		}
+	}
+	ms.logger.Infow("sending tags", "registries", len(ms.tags), "bytes", len(p))
+	return c.writePacket(0x0D, p)
 }
 
 func (ms *MinecraftServer) handleStatus(c *connection) {

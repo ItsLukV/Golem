@@ -34,7 +34,7 @@ type Registry struct {
 	Entries []Entry
 }
 
-func Load() ([]Registry, error) {
+func LoadRegistries() ([]Registry, error) {
 	regs := make([]Registry, 0, len(SyncedRegistries))
 	for _, name := range SyncedRegistries {
 		root := path.Join("minecraft", name)
