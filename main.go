@@ -252,7 +252,6 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 		if err != nil {
 			return fmt.Errorf("read packet: %w", err)
 		}
-		ms.logger.Debugw("config packet", "id", fmt.Sprintf("0x%02X", id))
 
 		switch id {
 		case sbClientInfo, sbPluginMsg, sbKeepAlive:
