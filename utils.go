@@ -80,10 +80,21 @@ func (p *Packet) AppendUUID(id uuid.UUID) {
 	p.Data = append(p.Data, id[:]...)
 }
 
-func (p Packet) AppendBool(b bool) {
+func (p *Packet) AppendBool(b bool) {
 	if b {
 		p.Data = append(p.Data, 1)
 	} else {
 		p.Data = append(p.Data, 0)
+	}
+}
+
+func (p *Packet) AppendByte(b byte) {
+	p.Data = append(p.Data, b)
+}
+
+func (p *Packet) AppendStringArray(items []string) {
+	p.AppendVarint(len(items))
+	for _, s := range items {
+		p.AppendString(s)
 	}
 }

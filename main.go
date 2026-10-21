@@ -342,6 +342,35 @@ func (ms *MinecraftServer) sendTags(c *connection) error {
 	return c.writePacket(p)
 }
 
+func (ms *MinecraftServer) handlePlay(c *connection) error {
+	p := Packet{
+		PacketId: 0x31,
+	}
+	p.AppendInt(1)                                       // Entity ID
+	p.AppendBool(false)                                  // Is hardcore
+	p.AppendStringArray([]string{"minecraft:overworld"}) // Dimension Names
+	p.AppendVarint(1)                                    // Max Players (unused)
+	p.AppendVarint(8)                                    // View Distance
+	p.AppendVarint(8)                                    // Simulation Distance
+	p.AppendBool(false)                                  // Reduced Debug Info
+	p.AppendBool(true)                                   // Enable respawn screen
+	p.AppendBool(false)                                  // Do limited crafting (unused)
+	p.AppendVarint(0)                                    // Dimension Type (index into minecraft:dimension_type => overworld)
+	p.AppendString("minecraft:overworld")                // Dimension Name
+	p.AppendLong(0)                                      // Hashed seed
+	p.AppendByte(0)                                      // Game mode (unsigned byte)
+	p.AppendByte(0)                                      // Previous Game mode (byte)
+	p.AppendBool(false)                                  // Is Debug
+	p.AppendBool(false)                                  // Is Flat
+	p.AppendBool(false)                                  // Has death location
+	p.AppendVarint(0)                                    // Portal cooldown
+	p.AppendVarint(50)                                   // Sea level
+	p.AppendBool(false)                                  // Online mode
+	p.AppendBool(false)                                  // Enforces Secure Chat
+	ms.logger.Infow("sending play login", "bytes", p.Len())
+	return c.writePacket(p)
+}
+
 func (ms *MinecraftServer) handleStatus(c *connection) {
 	if c.state != stateStatus {
 		ms.logger.Errorw("Wrong state, expected status", "state", c.state)
