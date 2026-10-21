@@ -343,6 +343,19 @@ func (ms *MinecraftServer) sendTags(c *connection) error {
 }
 
 func (ms *MinecraftServer) handlePlay(c *connection) error {
+	if err := ms.sendLogin(c); err != nil {
+		return err
+	}
+	if err := ms.sendPlayerPosition(c); err != nil {
+		return err
+	}
+	if err := ms.readAcceptTeleportation(c); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (ms *MinecraftServer) sendLogin(c *connection) error {
 	p := Packet{
 		PacketId: 0x31,
 	}
@@ -369,6 +382,76 @@ func (ms *MinecraftServer) handlePlay(c *connection) error {
 	p.AppendBool(false)                                  // Enforces Secure Chat
 	ms.logger.Infow("sending play login", "bytes", p.Len())
 	return c.writePacket(p)
+}
+
+type TeleportFlags int32
+
+const (
+	RelX           TeleportFlags = 1 << iota // 0x0001
+	RelY                                     // 0x0002
+	RelZ                                     // 0x0004
+	RelYaw                                   // 0x0008
+	RelPitch                                 // 0x0010
+	RelVelX                                  // 0x0020
+	RelVelY                                  // 0x0040
+	RelVelZ                                  // 0x0080
+	RotateVelocity                           // 0x0100
+)
+
+func (ms *MinecraftServer) sendPlayerPosition(c *connection) error {
+	p := Packet{PacketId: 0x48}
+	p.AppendVarint(0) // Teleport ID
+	p.AppendDouble(0) // X
+	p.AppendDouble(0) // Y
+	p.AppendDouble(0) // Z
+	p.AppendDouble(0) // Velocity X
+	p.AppendDouble(0) // Velocity Y
+	p.AppendDouble(0) // Velocity Z
+	p.AppendFloat(0)  // Yaw
+	p.AppendFloat(0)  // Pitch
+	p.AppendInt(0)    // Relatives (teleport flags bitfield)
+	return c.writePacket(p)
+}
+
+func (ms *MinecraftServer) readAcceptTeleportation(c *connection) error {
+	packetID, body, err := c.readPacket()
+	if packetID != 0x00 {
+		return fmt.Errorf("Wrong packet id, expected 0x00 got %v", packetID)
+	}
+	if err != nil {
+		return err
+	}
+
+	TeleportID, err := binary.ReadUvarint(body)
+	if err != nil {
+		return err
+	}
+	if TeleportID != 0 {
+		return fmt.Errorf("wrong teleport id expected 0 and got %v", TeleportID)
+	}
+	return nil
+	// for 26.3:
+	// var X float64
+	// if err := binary.Read(body, binary.BigEndian, &X); err != nil {
+	// 	return err
+	// }
+	// var Y float64
+	// if err := binary.Read(body, binary.BigEndian, &Y); err != nil {
+	// 	return err
+	// }
+	// var Z float64
+	// if err := binary.Read(body, binary.BigEndian, &Z); err != nil {
+	// 	return err
+	// }
+	// var yaw float32
+	// if err := binary.Read(body, binary.BigEndian, &yaw); err != nil {
+	// 	return err
+	// }
+	// var pitch float32
+	// if err := binary.Read(body, binary.BigEndian, &pitch); err != nil {
+	// 	return err
+	// }
+	// return nil
 }
 
 func (ms *MinecraftServer) handleStatus(c *connection) {

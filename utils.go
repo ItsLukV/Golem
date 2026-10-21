@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 
 	"github.com/google/uuid"
 )
@@ -28,14 +29,6 @@ func readString(r *bytes.Reader) (string, error) {
 		return "", err
 	}
 	return string(buf), nil
-}
-
-// Deprecated
-func (c *connection) writePacket2(packetID int, payload []byte) error {
-	body := append(binary.AppendUvarint(nil, uint64(packetID)), payload...)
-	frame := append(binary.AppendUvarint(nil, uint64(len(body))), body...)
-	_, err := c.conn.Write(frame)
-	return err
 }
 
 func (c *connection) writePacket(p Packet) error {
@@ -97,4 +90,12 @@ func (p *Packet) AppendStringArray(items []string) {
 	for _, s := range items {
 		p.AppendString(s)
 	}
+}
+
+func (p *Packet) AppendDouble(f float64) {
+	p.Data = binary.BigEndian.AppendUint64(p.Data, math.Float64bits(f))
+}
+
+func (p *Packet) AppendFloat(f float32) {
+	p.Data = binary.BigEndian.AppendUint32(p.Data, math.Float32bits(f))
 }
