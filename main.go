@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	reg "github.com/itslukv/minecraftserver/registries"
@@ -91,6 +93,14 @@ type connection struct {
 	conn  net.Conn
 	r     *bufio.Reader
 	state connState
+
+	// Guards conn against the keep-alive goroutine writing a frame in the
+	// middle of one written from the read loop.
+	w sync.Mutex
+
+	// Set once the login packet is parsed.
+	name string
+	uuid uuid.UUID
 }
 
 func (c *connection) readPacket() (packetID uint64, body *bytes.Reader, err error) {
@@ -188,6 +198,7 @@ func (ms *MinecraftServer) handleLogin(c *connection) error {
 		return err
 	}
 	ms.logger.Infow("login", "name", name, "uuid", uuid)
+	c.name, c.uuid = *name, *uuid
 
 	err = ms.sendLoginSuccessPacket(c, *name, *uuid)
 	if err != nil {
@@ -198,7 +209,7 @@ func (ms *MinecraftServer) handleLogin(c *connection) error {
 	if err != nil {
 		return fmt.Errorf("read ackID: %v", err)
 	}
-	if ackID != 0x03 {
+	if ackID != LoginSbLoginAcknowledged {
 		return fmt.Errorf("expected login ack, got: %v", ackID)
 	}
 	ms.logger.Infow("Login ack", "name", name)
@@ -227,7 +238,7 @@ func (ms *MinecraftServer) parseLoginPacket(c *connection) (*string, *uuid.UUID,
 
 func (ms *MinecraftServer) sendLoginSuccessPacket(c *connection, username string, uuid uuid.UUID) error {
 	p := Packet{
-		PacketId: 0x2,
+		PacketId: LoginCbLoginFinished,
 	}
 	p.AppendUUID(uuid)
 	p.AppendString(username)
@@ -245,14 +256,6 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 		return fmt.Errorf("send know pack: %w", err)
 	}
 
-	const (
-		sbClientInfo = 0x00
-		sbPluginMsg  = 0x02
-		sbAckFinish  = 0x03
-		sbKeepAlive  = 0x04
-		sbKnownPacks = 0x07
-	)
-
 	sentRegistries := false
 	for {
 		id, r, err := c.readPacket()
@@ -261,10 +264,10 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 		}
 
 		switch id {
-		case sbClientInfo, sbPluginMsg, sbKeepAlive:
+		case ConfigSbClientInformation, ConfigSbCustomPayload, ConfigSbKeepAlive:
 			// Ignore packet for now
 			_ = r
-		case sbKnownPacks:
+		case ConfigSbSelectKnownPacks:
 			if sentRegistries {
 				return fmt.Errorf("client sent Known Packs twice")
 			}
@@ -277,10 +280,10 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 			if err != nil {
 				return err
 			}
-			if err := c.writePacket(Packet{PacketId: 0x03, Data: nil}); err != nil {
+			if err := c.writePacket(Packet{PacketId: ConfigCbFinishConfiguration, Data: nil}); err != nil {
 				return err
 			}
-		case sbAckFinish:
+		case ConfigSbFinishConfiguration:
 			ms.logger.Infoln("configuration finished")
 			c.state = statePlay
 			return nil
@@ -292,7 +295,7 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 
 func (ms *MinecraftServer) sendKnowPacks(c *connection) error {
 	p := Packet{
-		PacketId: 0x0E,
+		PacketId: ConfigCbSelectKnownPacks,
 	}
 	p.AppendVarint(1)
 	p.AppendString("minecraft")
@@ -307,7 +310,7 @@ func (ms *MinecraftServer) sendKnowPacks(c *connection) error {
 func (ms *MinecraftServer) sendRegistries(c *connection) error {
 	for _, r := range ms.registries {
 		p := Packet{
-			PacketId: 0x07,
+			PacketId: ConfigCbRegistryData,
 		}
 		p.AppendString(r.ID)
 		p.AppendVarint(len(r.Entries))
@@ -324,7 +327,7 @@ func (ms *MinecraftServer) sendRegistries(c *connection) error {
 
 func (ms *MinecraftServer) sendTags(c *connection) error {
 	p := Packet{
-		PacketId: 0x0D,
+		PacketId: ConfigCbUpdateTags,
 	}
 	p.AppendVarint(len(ms.tags))
 	for _, r := range ms.tags {
@@ -352,12 +355,66 @@ func (ms *MinecraftServer) handlePlay(c *connection) error {
 	if err := ms.readAcceptTeleportation(c); err != nil {
 		return err
 	}
-	return nil
+	if err := ms.sendPlayerInfoUpdate(c); err != nil {
+		return err
+	}
+	return ms.playLoop(c)
+}
+
+func (ms *MinecraftServer) playLoop(c *connection) error {
+	stop := make(chan struct{})
+	defer close(stop)
+	go ms.sendKeepAlives(c, stop)
+
+	unhandled := map[uint64]bool{}
+	for {
+		id, body, err := c.readPacket()
+		if err != nil {
+			if err == io.EOF {
+				ms.logger.Infow("client disconnected", "name", c.name)
+				return nil
+			}
+			return fmt.Errorf("read packet: %w", err)
+		}
+
+		switch id {
+		case PlaySbKeepAlive:
+			// Echo of our own token; only its arrival matters.
+			var token int64
+			if err := binary.Read(body, binary.BigEndian, &token); err != nil {
+				return fmt.Errorf("keep alive: %w", err)
+			}
+		default:
+			// Logged once per ID so the movement packets don't flood the log.
+			if !unhandled[id] {
+				unhandled[id] = true
+				ms.logger.Debugw("unhandled play packet", "id", fmt.Sprintf("0x%02X", id))
+			}
+		}
+	}
+}
+
+func (ms *MinecraftServer) sendKeepAlives(c *connection, stop <-chan struct{}) {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			p := Packet{PacketId: PlayCbKeepAlive}
+			p.AppendLong(time.Now().UnixMilli())
+			if err := c.writePacket(p); err != nil {
+				ms.logger.Errorw("keep alive failed", "err", err)
+				return
+			}
+		}
+	}
 }
 
 func (ms *MinecraftServer) sendLogin(c *connection) error {
 	p := Packet{
-		PacketId: 0x31,
+		PacketId: PlayCbLogin,
 	}
 	p.AppendInt(1)                                       // Entity ID
 	p.AppendBool(false)                                  // Is hardcore
@@ -399,7 +456,7 @@ const (
 )
 
 func (ms *MinecraftServer) sendPlayerPosition(c *connection) error {
-	p := Packet{PacketId: 0x48}
+	p := Packet{PacketId: PlayCbPlayerPosition}
 	p.AppendVarint(0) // Teleport ID
 	p.AppendDouble(0) // X
 	p.AppendDouble(0) // Y
@@ -413,45 +470,91 @@ func (ms *MinecraftServer) sendPlayerPosition(c *connection) error {
 	return c.writePacket(p)
 }
 
+// readAcceptTeleportation waits for the client to confirm the teleport sent by
+// sendPlayerPosition. The client is free to send other packets first
+// (client_information, custom_payload, client_tick_end, ...), so skip anything
+// that is not the confirmation rather than treating it as an error.
 func (ms *MinecraftServer) readAcceptTeleportation(c *connection) error {
-	packetID, body, err := c.readPacket()
-	if packetID != 0x00 {
-		return fmt.Errorf("Wrong packet id, expected 0x00 got %v", packetID)
-	}
-	if err != nil {
-		return err
-	}
+	for {
+		packetID, body, err := c.readPacket()
+		if err != nil {
+			return fmt.Errorf("read packet: %w", err)
+		}
+		if packetID != PlaySbAcceptTeleportation {
+			ms.logger.Debugw("waiting for teleport confirm, skipping packet",
+				"id", fmt.Sprintf("0x%02X", packetID))
+			continue
+		}
 
-	TeleportID, err := binary.ReadUvarint(body)
-	if err != nil {
-		return err
+		TeleportID, err := binary.ReadUvarint(body)
+		if err != nil {
+			return err
+		}
+		if TeleportID != 0 {
+			return fmt.Errorf("wrong teleport id expected 0 and got %v", TeleportID)
+		}
+		return nil
+		// for 26.3:
+		// var X float64
+		// if err := binary.Read(body, binary.BigEndian, &X); err != nil {
+		// 	return err
+		// }
+		// var Y float64
+		// if err := binary.Read(body, binary.BigEndian, &Y); err != nil {
+		// 	return err
+		// }
+		// var Z float64
+		// if err := binary.Read(body, binary.BigEndian, &Z); err != nil {
+		// 	return err
+		// }
+		// var yaw float32
+		// if err := binary.Read(body, binary.BigEndian, &yaw); err != nil {
+		// 	return err
+		// }
+		// var pitch float32
+		// if err := binary.Read(body, binary.BigEndian, &pitch); err != nil {
+		// 	return err
+		// }
+		// return nil
 	}
-	if TeleportID != 0 {
-		return fmt.Errorf("wrong teleport id expected 0 and got %v", TeleportID)
-	}
-	return nil
-	// for 26.3:
-	// var X float64
-	// if err := binary.Read(body, binary.BigEndian, &X); err != nil {
-	// 	return err
-	// }
-	// var Y float64
-	// if err := binary.Read(body, binary.BigEndian, &Y); err != nil {
-	// 	return err
-	// }
-	// var Z float64
-	// if err := binary.Read(body, binary.BigEndian, &Z); err != nil {
-	// 	return err
-	// }
-	// var yaw float32
-	// if err := binary.Read(body, binary.BigEndian, &yaw); err != nil {
-	// 	return err
-	// }
-	// var pitch float32
-	// if err := binary.Read(body, binary.BigEndian, &pitch); err != nil {
-	// 	return err
-	// }
-	// return nil
+}
+
+// PlayerInfoAction selects which per-entry fields the Player Info Update packet
+// carries. The wire format is an EnumSet over the 8 actions below, encoded as a
+// fixed bitset of ceil(8/8) = 1 byte with ADD_PLAYER as the least significant bit.
+type PlayerInfoAction byte
+
+const (
+	AddPlayer         PlayerInfoAction = 1 << iota // 0x01
+	InitializeChat                                 // 0x02
+	UpdateGameMode                                 // 0x04
+	UpdateListed                                   // 0x08
+	UpdateLatency                                  // 0x10
+	UpdateDisplayName                              // 0x20
+	UpdateListOrder                                // 0x40
+	UpdateHat                                      // 0x80
+)
+
+func (ms *MinecraftServer) sendPlayerInfoUpdate(c *connection) error {
+	actions := AddPlayer | UpdateGameMode | UpdateListed | UpdateLatency
+
+	p := Packet{PacketId: PlayCbPlayerInfoUpdate}
+	p.AppendByte(byte(actions))
+	p.AppendVarint(1) // Number of entries
+
+	p.AppendUUID(c.uuid)   // Profile ID
+	p.AppendString(c.name) // AddPlayer: name
+	p.AppendVarint(0)      // AddPlayer: signed profile properties (none)
+	p.AppendVarint(0)      // UpdateGameMode: survival
+	p.AppendBool(true)     // UpdateListed: show in the tab list
+	p.AppendVarint(0)      // UpdateLatency: ping in ms
+
+	ms.logger.Infow("sending player info update",
+		"name", c.name,
+		"actions", fmt.Sprintf("0x%02X", byte(actions)),
+		"bytes", p.Len(),
+	)
+	return c.writePacket(p)
 }
 
 func (ms *MinecraftServer) handleStatus(c *connection) {
@@ -466,27 +569,27 @@ func (ms *MinecraftServer) handleStatus(c *connection) {
 		}
 		switch packetID {
 
-		case 0x00:
+		case StatusSbStatusRequest:
 			status := `{
 				"version": {"name": "26.2", "protocol": 776},
 				"players": {"max": -1, "online": 0},
 				"description": {"text": "Hello from Go!"}
 			}`
 			packet := Packet{
-				PacketId: 0x00,
+				PacketId: StatusCbStatusResponse,
 			}
 			packet.AppendString(status)
 			if err := c.writePacket(packet); err != nil {
 				return
 			}
 
-		case 0x01:
+		case StatusSbPingRequest:
 			var nonce int64
 			if err := binary.Read(p, binary.BigEndian, &nonce); err != nil {
 				return
 			}
 			packet := Packet{
-				PacketId: 0x01,
+				PacketId: StatusCbPongResponse,
 			}
 			packet.AppendLong(nonce)
 			if err := c.writePacket(packet); err != nil {

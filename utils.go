@@ -34,6 +34,8 @@ func readString(r *bytes.Reader) (string, error) {
 func (c *connection) writePacket(p Packet) error {
 	body := append(binary.AppendUvarint(nil, uint64(p.PacketId)), p.Data...)
 	frame := append(binary.AppendUvarint(nil, uint64(len(body))), body...)
+	c.w.Lock()
+	defer c.w.Unlock()
 	_, err := c.conn.Write(frame)
 	return err
 }
