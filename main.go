@@ -167,6 +167,11 @@ func (ms *MinecraftServer) handleConnection(conn net.Conn) {
 			ms.logger.Errorw("configuration failed", "err", err)
 			return
 		}
+		if err := ms.handlePlay(c); err != nil {
+			ms.logger.Errorw("play failed", "err", err)
+			return
+
+		}
 	case 3: // Transfer
 	default:
 		return
@@ -221,12 +226,14 @@ func (ms *MinecraftServer) parseLoginPacket(c *connection) (*string, *uuid.UUID,
 }
 
 func (ms *MinecraftServer) sendLoginSuccessPacket(c *connection, username string, uuid uuid.UUID) error {
-	var loginSuccess []byte
-	loginSuccess = appendUUID(loginSuccess, uuid)
-	loginSuccess = appendString(loginSuccess, username)
-	loginSuccess = binary.AppendUvarint(loginSuccess, 0)
-	loginSuccess = appendUUID(loginSuccess, uuid)
-	return c.writePacket(0x2, loginSuccess)
+	p := Packet{
+		PacketId: 0x2,
+	}
+	p.AppendUUID(uuid)
+	p.AppendString(username)
+	p.AppendVarint(0)
+	p.AppendUUID(uuid)
+	return c.writePacket(p)
 }
 
 func (ms *MinecraftServer) handleConfiguration(c *connection) error {
@@ -270,7 +277,7 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 			if err != nil {
 				return err
 			}
-			if err := c.writePacket(0x03, nil); err != nil {
+			if err := c.writePacket(Packet{PacketId: 0x03, Data: nil}); err != nil {
 				return err
 			}
 		case sbAckFinish:
@@ -284,12 +291,14 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 }
 
 func (ms *MinecraftServer) sendKnowPacks(c *connection) error {
-	var b []byte
-	b = binary.AppendUvarint(b, 1)
-	b = appendString(b, "minecraft")
-	b = appendString(b, "core")
-	b = appendString(b, "26.2")
-	if err := c.writePacket(0x0E, b); err != nil {
+	p := Packet{
+		PacketId: 0x0E,
+	}
+	p.AppendVarint(1)
+	p.AppendString("minecraft")
+	p.AppendString("core")
+	p.AppendString("26.2")
+	if err := c.writePacket(p); err != nil {
 		return fmt.Errorf("failed to send packet")
 	}
 	return nil
@@ -297,14 +306,16 @@ func (ms *MinecraftServer) sendKnowPacks(c *connection) error {
 
 func (ms *MinecraftServer) sendRegistries(c *connection) error {
 	for _, r := range ms.registries {
-		var p []byte
-		p = appendString(p, r.ID)
-		p = binary.AppendUvarint(p, uint64(len(r.Entries)))
-		for _, e := range r.Entries {
-			p = appendString(p, e.ID)
-			p = append(p, 0)
+		p := Packet{
+			PacketId: 0x07,
 		}
-		if err := c.writePacket(0x07, p); err != nil {
+		p.AppendString(r.ID)
+		p.AppendVarint(len(r.Entries))
+		for _, e := range r.Entries {
+			p.AppendString(e.ID)
+			p.Data = append(p.Data, 0)
+		}
+		if err := c.writePacket(p); err != nil {
 			return fmt.Errorf("registry %s: %w", r.ID, err)
 		}
 	}
@@ -312,21 +323,23 @@ func (ms *MinecraftServer) sendRegistries(c *connection) error {
 }
 
 func (ms *MinecraftServer) sendTags(c *connection) error {
-	var p []byte
-	p = binary.AppendUvarint(p, uint64(len(ms.tags)))
+	p := Packet{
+		PacketId: 0x0D,
+	}
+	p.AppendVarint(len(ms.tags))
 	for _, r := range ms.tags {
-		p = appendString(p, r.ID)
-		p = binary.AppendUvarint(p, uint64(len(r.Tags)))
+		p.AppendString(r.ID)
+		p.AppendVarint(len(r.Tags))
 		for name, ids := range r.Tags {
-			p = appendString(p, name)
-			p = binary.AppendUvarint(p, uint64(len(ids)))
+			p.AppendString(name)
+			p.AppendVarint(len(ids))
 			for _, id := range ids {
-				p = binary.AppendUvarint(p, uint64(id))
+				p.AppendVarint(id)
 			}
 		}
 	}
-	ms.logger.Infow("sending tags", "registries", len(ms.tags), "bytes", len(p))
-	return c.writePacket(0x0D, p)
+	ms.logger.Infow("sending tags", "registries", len(ms.tags), "bytes", p.Len())
+	return c.writePacket(p)
 }
 
 func (ms *MinecraftServer) handleStatus(c *connection) {
@@ -347,8 +360,11 @@ func (ms *MinecraftServer) handleStatus(c *connection) {
 				"players": {"max": -1, "online": 0},
 				"description": {"text": "Hello from Go!"}
 			}`
-			payload := appendString(nil, status)
-			if err := c.writePacket(0x00, payload); err != nil {
+			packet := Packet{
+				PacketId: 0x00,
+			}
+			packet.AppendString(status)
+			if err := c.writePacket(packet); err != nil {
 				return
 			}
 
@@ -357,9 +373,11 @@ func (ms *MinecraftServer) handleStatus(c *connection) {
 			if err := binary.Read(p, binary.BigEndian, &nonce); err != nil {
 				return
 			}
-			payload := make([]byte, 8)
-			binary.BigEndian.PutUint64(payload, uint64(nonce))
-			if err := c.writePacket(0x01, payload); err != nil {
+			packet := Packet{
+				PacketId: 0x01,
+			}
+			packet.AppendLong(nonce)
+			if err := c.writePacket(packet); err != nil {
 				return
 			}
 

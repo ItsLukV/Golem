@@ -15,10 +15,6 @@ func readUUID(r io.Reader) (uuid.UUID, error) {
 	return id, err
 }
 
-func appendUUID(b []byte, id uuid.UUID) []byte {
-	return append(b, id[:]...)
-}
-
 func readString(r *bytes.Reader) (string, error) {
 	length, err := binary.ReadUvarint(r)
 	if err != nil {
@@ -34,14 +30,60 @@ func readString(r *bytes.Reader) (string, error) {
 	return string(buf), nil
 }
 
-func (c *connection) writePacket(packetID int, payload []byte) error {
+// Deprecated
+func (c *connection) writePacket2(packetID int, payload []byte) error {
 	body := append(binary.AppendUvarint(nil, uint64(packetID)), payload...)
 	frame := append(binary.AppendUvarint(nil, uint64(len(body))), body...)
 	_, err := c.conn.Write(frame)
 	return err
 }
 
-func appendString(b []byte, s string) []byte {
-	b = binary.AppendUvarint(b, uint64(len(s)))
-	return append(b, s...)
+func (c *connection) writePacket(p Packet) error {
+	body := append(binary.AppendUvarint(nil, uint64(p.PacketId)), p.Data...)
+	frame := append(binary.AppendUvarint(nil, uint64(len(body))), body...)
+	_, err := c.conn.Write(frame)
+	return err
+}
+
+type Packet struct {
+	PacketId int
+	Data     []byte
+}
+
+func (p *Packet) AppendString(s string) {
+	p.AppendVarint(len(s))
+	p.Data = append(p.Data, s...)
+}
+
+func (p *Packet) AppendVarint(i int) {
+	p.Data = binary.AppendUvarint(p.Data, uint64(i))
+}
+
+func (p *Packet) AppendInt(i int) {
+	p.Data = binary.BigEndian.AppendUint32(p.Data, uint32(i))
+}
+
+func (p *Packet) AppendLong(l int64) {
+	p.Data = binary.BigEndian.AppendUint64(p.Data, uint64(l))
+}
+
+func (p *Packet) AppendArray(arr []byte) {
+	p.AppendVarint(len(arr))
+	p.Data = append(p.Data, arr...)
+}
+
+func (p *Packet) Len() int {
+	return len(p.Data)
+}
+
+func (p *Packet) AppendUUID(id uuid.UUID) {
+	p.Data = append(p.Data, id[:]...)
+}
+
+func (p Packet) AppendBool(b bool) {
+	if b {
+		p.Data = append(p.Data, 1)
+	} else {
+		p.Data = append(p.Data, 0)
+	}
 }
