@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"math"
 	"net"
 
 	"github.com/itslukv/minecraftserver/server"
@@ -39,8 +40,34 @@ func main() {
 		logger.Fatal(err)
 	}
 
-	logger.Infoln("Server listening on :25565")
 	ms := server.NewServer(logger, registries, tags)
+
+	ms.OnJoin(func(p *server.Player) error {
+		pos := p.Pos()
+		pos.X = 8
+		pos.Z = 8
+		return p.Teleport(pos)
+	})
+
+	ms.OnUseItem(func(p *server.Player) error {
+		pos := p.Pos()
+		dx, _, dz := lookVector(pos.Yaw, pos.Pitch)
+		const l = 5
+		pos.X += dx * l
+		pos.Z += dz * l
+		return p.Teleport(pos)
+	})
+
+	ms.OnMove(func(p *server.Player, prev server.PlayerPos) error {
+		pos := p.Pos()
+		if pos.Y-prev.Y > 0 && !pos.OnGround {
+			pos.Y += 1
+			return p.Teleport(pos)
+		}
+		return nil
+	})
+
+	logger.Infoln("Server listening on :25565")
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -50,4 +77,11 @@ func main() {
 
 		go ms.HandleConnection(conn)
 	}
+}
+
+func lookVector(yaw, pitch float32) (dx, dy, dz float64) {
+	y := float64(yaw) * math.Pi / 180
+	p := float64(pitch) * math.Pi / 180
+
+	return -math.Sin(y) * math.Cos(p), -math.Sin(p), math.Cos(y) * math.Cos(p)
 }

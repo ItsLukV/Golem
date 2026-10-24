@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -72,35 +73,94 @@ func (c *connection) readPacket() (packetID uint64, body *bytes.Reader, err erro
 }
 
 type Player struct {
-	name string
-	uuid uuid.UUID
+	EntityID int32
+	name     string
+	uuid     uuid.UUID
+
+	mu  sync.RWMutex
+	pos PlayerPos
+
+	conn         *connection
+	nextTeleport atomic.Int32
+}
+
+type PlayerPos struct {
+	X, Y, Z    float64
+	Yaw, Pitch float32
+	OnGround   bool
 }
 
 type MinecraftServer struct {
 	Logger     *zap.SugaredLogger
 	registries []reg.Registry
 	tags       []reg.TagRegistry
-	players    []*Player
+
+	mu      sync.RWMutex
+	players map[uuid.UUID]*Player
+	nextEID atomic.Int32
+
+	hmu       sync.RWMutex
+	onJoin    []func(*Player) error
+	onMove    []func(*Player, PlayerPos) error
+	onLeave   []func(*Player)
+	onUseItem []func(*Player) error
 }
 
-func NewServer(log *zap.SugaredLogger, regs []reg.Registry, tags []reg.TagRegistry) MinecraftServer {
-	return MinecraftServer{
+func (ms *MinecraftServer) registerPlayer(c *connection, name string, id uuid.UUID) *Player {
+	p := &Player{
+		EntityID: ms.nextEID.Add(1),
+		name:     name,
+		uuid:     id,
+		conn:     c,
+	}
+	ms.mu.Lock()
+	ms.players[id] = p
+	online := len(ms.players)
+	ms.mu.Unlock()
+	ms.Logger.Infow("player joined", "name", name, "entity", p.EntityID, "online", online)
+	return p
+}
+
+func (ms *MinecraftServer) unregisterPlayer(p *Player) {
+	ms.mu.Lock()
+	delete(ms.players, p.uuid)
+	online := len(ms.players)
+	ms.mu.Unlock()
+	ms.Logger.Infow("player left", "name", p.name, "online", online)
+}
+
+func (ms *MinecraftServer) Players() []*Player {
+	ms.mu.RLock()
+	defer ms.mu.RUnlock()
+	out := make([]*Player, 0, len(ms.players))
+	for _, p := range ms.players {
+		out = append(out, p)
+	}
+	return out
+}
+
+func NewServer(log *zap.SugaredLogger, regs []reg.Registry, tags []reg.TagRegistry) *MinecraftServer {
+	return &MinecraftServer{
 		Logger:     log,
 		registries: regs,
 		tags:       tags,
+		players:    map[uuid.UUID]*Player{},
 	}
 }
 
 func (ms *MinecraftServer) HandleConnection(conn net.Conn) {
-	player := &Player{}
-	ms.players = append(ms.players, player)
 	defer conn.Close()
 	c := &connection{
-		conn:   conn,
-		r:      bufio.NewReader(conn),
-		state:  stateHandshaking,
-		player: player,
+		conn:  conn,
+		r:     bufio.NewReader(conn),
+		state: stateHandshaking,
 	}
+	defer func() {
+		if c.player != nil {
+			ms.unregisterPlayer(c.player)
+			ms.fireLeave(c.player)
+		}
+	}()
 
 	_, p, err := c.readPacket()
 	if err != nil {
@@ -166,8 +226,7 @@ func (ms *MinecraftServer) handleLogin(c *connection) error {
 		return err
 	}
 	ms.Logger.Infow("login", "name", name, "uuid", uuid)
-	c.player.name = *name
-	c.player.uuid = *uuid
+	c.player = ms.registerPlayer(c, *name, *uuid)
 
 	err = ms.sendLoginSuccessPacket(c, *name, *uuid)
 	if err != nil {
@@ -335,6 +394,9 @@ func (ms *MinecraftServer) handlePlay(c *connection) error {
 	}
 	if err := ms.sendChunks(c, 0, 0); err != nil {
 		return err
+	}
+	if err := ms.fireJoin(c.player); err != nil {
+		return fmt.Errorf("join rejected: %w", err)
 	}
 	return ms.playLoop(c)
 }
@@ -523,49 +585,63 @@ func (ms *MinecraftServer) playLoop(c *connection) error {
 
 		switch id {
 		case PlaySbKeepAlive:
-			// Echo of our own token; only its arrival matters.
 			var token int64
 			if err := binary.Read(body, binary.BigEndian, &token); err != nil {
 				return fmt.Errorf("keep alive: %w", err)
 			}
-		case PlaySbMovePlayerPos:
-			var x float64
-			if err := binary.Read(body, binary.BigEndian, &x); err != nil {
-				ms.Logger.Error(err)
+		case PlaySbAcceptTeleportation:
+			// Confirms a Teleport
+		case PlaySbMovePlayerPos, PlaySbMovePlayerPosRot,
+			PlaySbMovePlayerRot, PlaySbMovePlayerStatusOnly:
+			pos := c.player.Pos()
+			hasPos := id == PlaySbMovePlayerPos || id == PlaySbMovePlayerPosRot
+			hasRot := id == PlaySbMovePlayerPosRot || id == PlaySbMovePlayerRot
+			if err := readMovement(body, &pos, hasPos, hasRot); err != nil {
+				ms.Logger.Errorw("movement",
+					"id", fmt.Sprintf("0x%02X", id), "err", err)
 				continue
 			}
-			var y float64
-			if err := binary.Read(body, binary.BigEndian, &y); err != nil {
-				ms.Logger.Error(err)
-				continue
+			prev := c.player.Pos()
+			c.player.setPos(pos)
+			if err := ms.fireMove(c.player, prev); err != nil {
+				ms.Logger.Debugw("move rejected", "name", c.player.name, "err", err)
+				if err := c.player.Teleport(prev); err != nil {
+					return fmt.Errorf("rubber-band: %w", err)
+				}
 			}
-			var z float64
-			if err := binary.Read(body, binary.BigEndian, &z); err != nil {
-				ms.Logger.Error(err)
-				continue
+		case PlaySbClientTickEnd:
+			continue
+		case PlaySbUseItemOn, PlaySbUseItem:
+			if err := ms.fireOnUseItem(c.player); err != nil {
+				ms.Logger.Debugw("failed to use item", "name", c.player.name, "err", err)
 			}
-			ms.Logger.Debugw("Incoming: Player Pos",
-				"x", fmt.Sprintf("%.2f", x),
-				"y", fmt.Sprintf("%.2f", y),
-				"z", fmt.Sprintf("%.2f", z),
-			)
-			// p := PlayerPos{
-
-			// }
-		// case PlaySbClientTickEnd:
-		// 	continue
 		default:
-			// Logged once per ID so the movement packets don't flood the log.
 			ms.Logger.Debugw("unhandled play packet", "id", fmt.Sprintf("0x%02X", id))
 		}
 	}
 }
 
-type PlayerPos struct {
-	X     float64
-	Y     float64
-	Z     float64
-	Flags byte
+func readMovement(body *bytes.Reader, pos *PlayerPos, hasPos, hasRot bool) error {
+	if hasPos {
+		for _, f := range []*float64{&pos.X, &pos.Y, &pos.Z} {
+			if err := binary.Read(body, binary.BigEndian, f); err != nil {
+				return err
+			}
+		}
+	}
+	if hasRot {
+		for _, f := range []*float32{&pos.Yaw, &pos.Pitch} {
+			if err := binary.Read(body, binary.BigEndian, f); err != nil {
+				return err
+			}
+		}
+	}
+	var flags byte
+	if err := binary.Read(body, binary.BigEndian, &flags); err != nil {
+		return err
+	}
+	pos.OnGround = flags&0x01 != 0
+	return nil
 }
 
 func (ms *MinecraftServer) sendKeepAlives(c *connection, stop <-chan struct{}) {
@@ -590,7 +666,7 @@ func (ms *MinecraftServer) sendLogin(c *connection) error {
 	p := Packet{
 		PacketId: PlayCbLogin,
 	}
-	p.AppendInt(1)                                       // Entity ID
+	p.AppendInt(c.player.EntityID)                       // Entity ID
 	p.AppendBool(false)                                  // Is hardcore
 	p.AppendStringArray([]string{"minecraft:overworld"}) // Dimension Names
 	p.AppendVarint(1)                                    // Max Players (unused)
@@ -644,10 +720,6 @@ func (ms *MinecraftServer) sendPlayerPosition(c *connection) error {
 	return c.writePacket(p)
 }
 
-// readAcceptTeleportation waits for the client to confirm the teleport sent by
-// sendPlayerPosition. The client is free to send other packets first
-// (client_information, custom_payload, client_tick_end, ...), so skip anything
-// that is not the confirmation rather than treating it as an error.
 func (ms *MinecraftServer) readAcceptTeleportation(c *connection) error {
 	for {
 		packetID, body, err := c.readPacket()
@@ -693,9 +765,6 @@ func (ms *MinecraftServer) readAcceptTeleportation(c *connection) error {
 	}
 }
 
-// PlayerInfoAction selects which per-entry fields the Player Info Update packet
-// carries. The wire format is an EnumSet over the 8 actions below, encoded as a
-// fixed bitset of ceil(8/8) = 1 byte with ADD_PLAYER as the least significant bit.
 type PlayerInfoAction byte
 
 const (
@@ -744,11 +813,11 @@ func (ms *MinecraftServer) handleStatus(c *connection) {
 		switch packetID {
 
 		case StatusSbStatusRequest:
-			status := `{
+			status := fmt.Sprintf(`{
 				"version": {"name": "26.2", "protocol": 776},
-				"players": {"max": -1, "online": 0},
+				"players": {"max": %v, "online": %v},
 				"description": {"text": "Hello from Go!"}
-			}`
+			}`, len(ms.players)+1, len(ms.players))
 			packet := Packet{
 				PacketId: StatusCbStatusResponse,
 			}
