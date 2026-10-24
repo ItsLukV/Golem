@@ -6,7 +6,7 @@
 // The constants are untyped so they work both as Packet.PacketId (int) and in
 // comparisons against the uint64 packet ID returned by connection.readPacket.
 
-package main
+package server
 
 // Handshake state, serverbound.
 const (
