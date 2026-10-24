@@ -402,24 +402,31 @@ func (ms *MinecraftServer) sendLevelChunkWithLight(c *connection, chunkX, chunkZ
 
 	p.AppendVarint(0) // Heightmaps
 
-	air := ChunkSection{
-		BlockCount: 0,
-		FluidCount: 0,
-		BlockStates: PalettedContainer{
-			BitsPerEntry: 0,
-			Palette:      0,
-			DataArray:    nil,
-		},
-		Biomes: PalettedContainer{
-			BitsPerEntry: 0,
-			Palette:      0,
-			DataArray:    nil,
-		},
+	const floorSections = 4
+	const stoneStateID = 1
+	stone := ChunkSection{
+		BlockCount:  16 * 16 * 16,
+		FluidCount:  0,
+		BlockStates: PalettedContainer{BitsPerEntry: 0, Palette: stoneStateID},
+		Biomes:      PalettedContainer{BitsPerEntry: 0, Palette: 0},
 	}
-	section := air.ToByte()
-	sections := make([]byte, 0, worldSections*len(section))
-	for range worldSections {
-		sections = append(sections, section...)
+
+	air := ChunkSection{
+		BlockCount:  0,
+		FluidCount:  0,
+		BlockStates: PalettedContainer{BitsPerEntry: 0, Palette: 0},
+		Biomes:      PalettedContainer{BitsPerEntry: 0, Palette: 0},
+	}
+
+	solid, empty := stone.ToByte(), air.ToByte()
+
+	sections := make([]byte, 0, worldSections*len(empty))
+	for i := range worldSections {
+		if i < floorSections {
+			sections = append(sections, solid...)
+			continue
+		}
+		sections = append(sections, empty...)
 	}
 	p.AppendPrefixedArray(sections) // Data
 
@@ -506,7 +513,6 @@ func (pc PalettedContainer) ToByte() []byte {
 	out := []byte{}
 	out = append(out, pc.BitsPerEntry)
 	out = binary.AppendUvarint(out, uint64(pc.Palette))
-	out = binary.AppendUvarint(out, uint64(len(pc.DataArray)))
 	for _, v := range pc.DataArray {
 		out = binary.BigEndian.AppendUint64(out, uint64(v))
 	}
