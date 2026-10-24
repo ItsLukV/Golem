@@ -41,20 +41,20 @@ func (c *connection) writePacket(p Packet) error {
 }
 
 type Packet struct {
-	PacketId int
+	PacketId int32
 	Data     []byte
 }
 
 func (p *Packet) AppendString(s string) {
-	p.AppendVarint(len(s))
+	p.AppendVarint(int32(len(s)))
 	p.Data = append(p.Data, s...)
 }
 
-func (p *Packet) AppendVarint(i int) {
+func (p *Packet) AppendVarint(i int32) {
 	p.Data = binary.AppendUvarint(p.Data, uint64(i))
 }
 
-func (p *Packet) AppendInt(i int) {
+func (p *Packet) AppendInt(i int32) {
 	p.Data = binary.BigEndian.AppendUint32(p.Data, uint32(i))
 }
 
@@ -62,9 +62,33 @@ func (p *Packet) AppendLong(l int64) {
 	p.Data = binary.BigEndian.AppendUint64(p.Data, uint64(l))
 }
 
-func (p *Packet) AppendArray(arr []byte) {
-	p.AppendVarint(len(arr))
+func (p *Packet) AppendPrefixedArray(arr []byte) {
+	p.AppendVarint(int32(len(arr)))
 	p.Data = append(p.Data, arr...)
+}
+
+type ToByte interface {
+	ToByte() []byte
+}
+
+func (p *Packet) Append(v ToByte) {
+	p.Data = append(p.Data, v.ToByte()...)
+}
+
+type BitSet []int64
+
+func (b BitSet) ToByte() []byte {
+	out := binary.AppendUvarint(nil, uint64(len(b)))
+	for _, l := range b {
+		out = binary.BigEndian.AppendUint64(out, uint64(l))
+	}
+	return out
+}
+
+func AppendArray[T ToByte](p *Packet, arr []T) {
+	for _, v := range arr {
+		p.Data = append(p.Data, v.ToByte()...)
+	}
 }
 
 func (p *Packet) Len() int {
@@ -88,7 +112,7 @@ func (p *Packet) AppendByte(b byte) {
 }
 
 func (p *Packet) AppendStringArray(items []string) {
-	p.AppendVarint(len(items))
+	p.AppendVarint(int32(len(items)))
 	for _, s := range items {
 		p.AppendString(s)
 	}

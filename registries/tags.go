@@ -161,7 +161,7 @@ func idTables(regs []Registry) (map[string]map[string]int, error) {
 	for _, r := range regs {
 		m := map[string]int{}
 		for i, e := range r.Entries {
-			m[e.ID] = i
+			m[e.ID] = int(i)
 		}
 		ids[strings.TrimPrefix(r.ID, "minecraft:")] = m
 	}

@@ -313,7 +313,7 @@ func (ms *MinecraftServer) sendRegistries(c *connection) error {
 			PacketId: ConfigCbRegistryData,
 		}
 		p.AppendString(r.ID)
-		p.AppendVarint(len(r.Entries))
+		p.AppendVarint(int32(len(r.Entries)))
 		for _, e := range r.Entries {
 			p.AppendString(e.ID)
 			p.Data = append(p.Data, 0)
@@ -329,15 +329,15 @@ func (ms *MinecraftServer) sendTags(c *connection) error {
 	p := Packet{
 		PacketId: ConfigCbUpdateTags,
 	}
-	p.AppendVarint(len(ms.tags))
+	p.AppendVarint(int32(len(ms.tags)))
 	for _, r := range ms.tags {
 		p.AppendString(r.ID)
-		p.AppendVarint(len(r.Tags))
+		p.AppendVarint(int32(len(r.Tags)))
 		for name, ids := range r.Tags {
 			p.AppendString(name)
-			p.AppendVarint(len(ids))
+			p.AppendVarint(int32(len(ids)))
 			for _, id := range ids {
-				p.AppendVarint(id)
+				p.AppendVarint(int32(id))
 			}
 		}
 	}
@@ -358,7 +358,177 @@ func (ms *MinecraftServer) handlePlay(c *connection) error {
 	if err := ms.sendPlayerInfoUpdate(c); err != nil {
 		return err
 	}
+	if err := ms.sendGameEvent(c); err != nil {
+		return err
+	}
+	if err := ms.sendSetChunkCacheCenter(c); err != nil {
+		return err
+	}
+	if err := ms.sendChunks(c, 0, 0); err != nil {
+		return err
+	}
 	return ms.playLoop(c)
+}
+
+const viewDistance = 2
+
+func (ms *MinecraftServer) sendChunks(c *connection, centerX, centerZ int32) error {
+	if err := c.writePacket(Packet{PacketId: PlayCbChunkBatchStart}); err != nil {
+		return fmt.Errorf("chunk batch start: %w", err)
+	}
+
+	var count int32
+	for x := centerX - viewDistance; x <= centerX+viewDistance; x++ {
+		for z := centerZ - viewDistance; z <= centerZ+viewDistance; z++ {
+			if err := ms.sendLevelChunkWithLight(c, x, z); err != nil {
+				return fmt.Errorf("chunk %d,%d: %w", x, z, err)
+			}
+			count++
+		}
+	}
+
+	p := Packet{PacketId: PlayCbChunkBatchFinished}
+	p.AppendVarint(count)
+	ms.logger.Infow("sent chunk batch", "chunks", count)
+	return c.writePacket(p)
+}
+
+func (ms *MinecraftServer) sendLevelChunkWithLight(c *connection, chunkX, chunkZ int32) error {
+	p := Packet{
+		PacketId: PlayCbLevelChunkWithLight,
+	}
+	p.AppendInt(chunkX) // Chunk X
+	p.AppendInt(chunkZ) // Chunk Z
+
+	p.AppendVarint(0) // Heightmaps
+
+	air := ChunkSection{
+		BlockCount: 0,
+		FluidCount: 0,
+		BlockStates: PalettedContainer{
+			BitsPerEntry: 0,
+			Palette:      0,
+			DataArray:    nil,
+		},
+		Biomes: PalettedContainer{
+			BitsPerEntry: 0,
+			Palette:      0,
+			DataArray:    nil,
+		},
+	}
+	section := air.ToByte()
+	sections := make([]byte, 0, worldSections*len(section))
+	for range worldSections {
+		sections = append(sections, section...)
+	}
+	p.AppendPrefixedArray(sections) // Data
+
+	p.AppendPrefixedArray([]byte{}) // Block Entities
+
+	p.Append(fullBrightLight()) // Light Data
+
+	return c.writePacket(p)
+}
+
+const (
+	worldSections     = 384 / 16
+	lightSections     = worldSections + 2
+	lightSectionBytes = 16 * 16 * 16 / 2
+)
+
+type LightData struct {
+	SkyLightMask        BitSet
+	BlockLightMask      BitSet
+	EmptySkyLightMask   BitSet
+	EmptyBlockLightMask BitSet
+	SkyLight            [][]byte
+	BlockLight          [][]byte
+}
+
+func (ld LightData) ToByte() []byte {
+	out := []byte{}
+	out = append(out, ld.SkyLightMask.ToByte()...)
+	out = append(out, ld.BlockLightMask.ToByte()...)
+	out = append(out, ld.EmptySkyLightMask.ToByte()...)
+	out = append(out, ld.EmptyBlockLightMask.ToByte()...)
+	out = appendLightArrays(out, ld.SkyLight)
+	out = appendLightArrays(out, ld.BlockLight)
+	return out
+}
+
+func appendLightArrays(out []byte, arrays [][]byte) []byte {
+	out = binary.AppendUvarint(out, uint64(len(arrays)))
+	for _, a := range arrays {
+		out = binary.AppendUvarint(out, uint64(len(a)))
+		out = append(out, a...)
+	}
+	return out
+}
+
+var litSection = bytes.Repeat([]byte{0xFF}, lightSectionBytes)
+
+func fullBrightLight() LightData {
+	sky := make([][]byte, lightSections)
+	for i := range sky {
+		sky[i] = litSection
+	}
+	all := BitSet{int64(1)<<lightSections - 1}
+	return LightData{
+		SkyLightMask:        all,
+		EmptyBlockLightMask: all,
+		SkyLight:            sky,
+	}
+}
+
+type ChunkSection struct {
+	BlockCount  int16
+	FluidCount  int16
+	BlockStates PalettedContainer
+	Biomes      PalettedContainer
+}
+
+func (cs ChunkSection) ToByte() []byte {
+	out := []byte{}
+	out = binary.BigEndian.AppendUint16(out, uint16(cs.BlockCount))
+	out = binary.BigEndian.AppendUint16(out, uint16(cs.FluidCount))
+	out = append(out, cs.BlockStates.ToByte()...)
+	out = append(out, cs.Biomes.ToByte()...)
+	return out
+}
+
+type PalettedContainer struct {
+	BitsPerEntry uint8
+	Palette      int32 // TODO handle more palettes
+	DataArray    []int64
+}
+
+func (pc PalettedContainer) ToByte() []byte {
+	out := []byte{}
+	out = append(out, pc.BitsPerEntry)
+	out = binary.AppendUvarint(out, uint64(pc.Palette))
+	out = binary.AppendUvarint(out, uint64(len(pc.DataArray)))
+	for _, v := range pc.DataArray {
+		out = binary.BigEndian.AppendUint64(out, uint64(v))
+	}
+	return out
+}
+
+func (ms *MinecraftServer) sendGameEvent(c *connection) error {
+	p := Packet{
+		PacketId: PlayCbGameEvent,
+	}
+	p.AppendByte(13)
+	p.AppendFloat(13)
+	return c.writePacket(p)
+}
+
+func (ms *MinecraftServer) sendSetChunkCacheCenter(c *connection) error {
+	p := Packet{
+		PacketId: PlayCbSetChunkCacheCenter,
+	}
+	p.AppendVarint(0)
+	p.AppendVarint(0)
+	return c.writePacket(p)
 }
 
 func (ms *MinecraftServer) playLoop(c *connection) error {
@@ -395,6 +565,7 @@ func (ms *MinecraftServer) playLoop(c *connection) error {
 }
 
 func (ms *MinecraftServer) sendKeepAlives(c *connection, stop <-chan struct{}) {
+	return
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	for {
@@ -420,7 +591,7 @@ func (ms *MinecraftServer) sendLogin(c *connection) error {
 	p.AppendBool(false)                                  // Is hardcore
 	p.AppendStringArray([]string{"minecraft:overworld"}) // Dimension Names
 	p.AppendVarint(1)                                    // Max Players (unused)
-	p.AppendVarint(8)                                    // View Distance
+	p.AppendVarint(viewDistance)                         // View Distance
 	p.AppendVarint(8)                                    // Simulation Distance
 	p.AppendBool(false)                                  // Reduced Debug Info
 	p.AppendBool(true)                                   // Enable respawn screen
