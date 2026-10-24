@@ -51,9 +51,7 @@ type connection struct {
 	// middle of one written from the read loop.
 	w sync.Mutex
 
-	// Set once the login packet is parsed.
-	name string
-	uuid uuid.UUID
+	player *Player
 }
 
 func (c *connection) readPacket() (packetID uint64, body *bytes.Reader, err error) {
@@ -73,10 +71,16 @@ func (c *connection) readPacket() (packetID uint64, body *bytes.Reader, err erro
 	return id, p, nil
 }
 
+type Player struct {
+	name string
+	uuid uuid.UUID
+}
+
 type MinecraftServer struct {
 	Logger     *zap.SugaredLogger
 	registries []reg.Registry
 	tags       []reg.TagRegistry
+	players    []*Player
 }
 
 func NewServer(log *zap.SugaredLogger, regs []reg.Registry, tags []reg.TagRegistry) MinecraftServer {
@@ -88,11 +92,14 @@ func NewServer(log *zap.SugaredLogger, regs []reg.Registry, tags []reg.TagRegist
 }
 
 func (ms *MinecraftServer) HandleConnection(conn net.Conn) {
+	player := &Player{}
+	ms.players = append(ms.players, player)
 	defer conn.Close()
 	c := &connection{
-		conn:  conn,
-		r:     bufio.NewReader(conn),
-		state: stateHandshaking,
+		conn:   conn,
+		r:      bufio.NewReader(conn),
+		state:  stateHandshaking,
+		player: player,
 	}
 
 	_, p, err := c.readPacket()
@@ -159,7 +166,8 @@ func (ms *MinecraftServer) handleLogin(c *connection) error {
 		return err
 	}
 	ms.Logger.Infow("login", "name", name, "uuid", uuid)
-	c.name, c.uuid = *name, *uuid
+	c.player.name = *name
+	c.player.uuid = *uuid
 
 	err = ms.sendLoginSuccessPacket(c, *name, *uuid)
 	if err != nil {
@@ -507,7 +515,7 @@ func (ms *MinecraftServer) playLoop(c *connection) error {
 		id, body, err := c.readPacket()
 		if err != nil {
 			if err == io.EOF {
-				ms.Logger.Infow("client disconnected", "name", c.name)
+				ms.Logger.Infow("client disconnected", "name", c.player.name)
 				return nil
 			}
 			return fmt.Errorf("read packet: %w", err)
@@ -708,15 +716,15 @@ func (ms *MinecraftServer) sendPlayerInfoUpdate(c *connection) error {
 	p.AppendByte(byte(actions))
 	p.AppendVarint(1) // Number of entries
 
-	p.AppendUUID(c.uuid)   // Profile ID
-	p.AppendString(c.name) // AddPlayer: name
-	p.AppendVarint(0)      // AddPlayer: signed profile properties (none)
-	p.AppendVarint(0)      // UpdateGameMode: survival
-	p.AppendBool(true)     // UpdateListed: show in the tab list
-	p.AppendVarint(0)      // UpdateLatency: ping in ms
+	p.AppendUUID(c.player.uuid)   // Profile ID
+	p.AppendString(c.player.name) // AddPlayer: name
+	p.AppendVarint(0)             // AddPlayer: signed profile properties (none)
+	p.AppendVarint(0)             // UpdateGameMode: survival
+	p.AppendBool(true)            // UpdateListed: show in the tab list
+	p.AppendVarint(0)             // UpdateLatency: ping in ms
 
 	ms.Logger.Infow("sending player info update",
-		"name", c.name,
+		"name", c.player.name,
 		"actions", fmt.Sprintf("0x%02X", byte(actions)),
 		"bytes", p.Len(),
 	)
