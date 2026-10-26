@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	if err := genBlocks("./data/minecraft/registries.json", "./internal/block"); err != nil {
+	if err := genBlocks("./data/minecraft/blocks.json", "./internal/block"); err != nil {
 		panic(err)
 	}
 	if err := genPackets("./data/minecraft/packets.json", "./internal/protocol/packetid"); err != nil {

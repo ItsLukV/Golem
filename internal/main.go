@@ -449,7 +449,7 @@ func (ms *MinecraftServer) sendLevelChunkWithLight(c *connection, chunkX, chunkZ
 	stone := ChunkSection{
 		BlockCount:  16 * 16 * 16,
 		FluidCount:  0,
-		BlockStates: PalettedContainer{BitsPerEntry: 0, Palette: blocks.Granite},
+		BlockStates: PalettedContainer{BitsPerEntry: 0, Palette: blocks.OakLog},
 		Biomes:      PalettedContainer{BitsPerEntry: 0, Palette: 0},
 	}
 
