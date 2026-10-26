@@ -8,10 +8,9 @@ import (
 	"path"
 	"sort"
 	"strings"
-)
 
-//go:embed minecraft/registries.json
-var builtinJSON []byte
+	"github.com/itslukv/minecraftserver/data"
+)
 
 type TagRegistry struct {
 	ID   string
@@ -24,7 +23,7 @@ func LoadTags(regs []Registry) ([]TagRegistry, error) {
 		return nil, err
 	}
 	raw := map[string]map[string][]json.RawMessage{}
-	err = fs.WalkDir(files, "minecraft/tags", func(p string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(data.FS, "minecraft/tags", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || path.Ext(p) != ".json" {
 			return err
 		}
@@ -34,7 +33,7 @@ func LoadTags(regs []Registry) ([]TagRegistry, error) {
 		if !ok {
 			return nil
 		}
-		data, err := files.ReadFile(p)
+		data, err := data.FS.ReadFile(p)
 		if err != nil {
 			return err
 		}
@@ -146,7 +145,7 @@ func idTables(regs []Registry) (map[string]map[string]int, error) {
 			ProtocolID int `json:"protocol_id"`
 		} `json:"entries"`
 	}
-	if err := json.Unmarshal(builtinJSON, &builtin); err != nil {
+	if err := json.Unmarshal(data.RegistriesJSON, &builtin); err != nil {
 		return nil, fmt.Errorf("registries.json: %w", err)
 	}
 	ids := map[string]map[string]int{}

@@ -1,3 +1,4 @@
+//go:generate go run ./internal/gen
 package main
 
 import (
@@ -5,8 +6,8 @@ import (
 	"math"
 	"net"
 
-	"github.com/itslukv/minecraftserver/server"
-	reg "github.com/itslukv/minecraftserver/server/registries"
+	server "github.com/itslukv/minecraftserver/internal"
+	reg "github.com/itslukv/minecraftserver/internal/registries"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"

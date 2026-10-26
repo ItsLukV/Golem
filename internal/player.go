@@ -1,6 +1,9 @@
 package server
 
-import "github.com/google/uuid"
+import (
+	"github.com/google/uuid"
+	cbPlay "github.com/itslukv/minecraftserver/internal/protocol/packetid/play/clientbound"
+)
 
 func (p *Player) Name() string { return p.name }
 
@@ -19,7 +22,7 @@ func (p *Player) setPos(pos PlayerPos) {
 }
 
 func (p *Player) Teleport(pos PlayerPos) error {
-	pk := Packet{PacketId: PlayCbPlayerPosition}
+	pk := Packet{PacketId: cbPlay.PlayerPosition}
 	pk.AppendVarint(p.nextTeleport.Add(1)) // Teleport ID
 	pk.AppendDouble(pos.X)
 	pk.AppendDouble(pos.Y)

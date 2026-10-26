@@ -12,7 +12,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	reg "github.com/itslukv/minecraftserver/server/registries"
+	blocks "github.com/itslukv/minecraftserver/internal/block"
+	cbConfiguration "github.com/itslukv/minecraftserver/internal/protocol/packetid/configuration/clientbound"
+	sbConfiguration "github.com/itslukv/minecraftserver/internal/protocol/packetid/configuration/serverbound"
+	cbLogin "github.com/itslukv/minecraftserver/internal/protocol/packetid/login/clientbound"
+	sbLogin "github.com/itslukv/minecraftserver/internal/protocol/packetid/login/serverbound"
+	cbPlay "github.com/itslukv/minecraftserver/internal/protocol/packetid/play/clientbound"
+	sbPlay "github.com/itslukv/minecraftserver/internal/protocol/packetid/play/serverbound"
+	cbStatus "github.com/itslukv/minecraftserver/internal/protocol/packetid/status/clientbound"
+	sbStatus "github.com/itslukv/minecraftserver/internal/protocol/packetid/status/serverbound"
+	reg "github.com/itslukv/minecraftserver/internal/registries"
 	"go.uber.org/zap"
 )
 
@@ -55,7 +64,7 @@ type connection struct {
 	player *Player
 }
 
-func (c *connection) readPacket() (packetID uint64, body *bytes.Reader, err error) {
+func (c *connection) readPacket() (packetID int32, body *bytes.Reader, err error) {
 	length, err := binary.ReadUvarint(c.r)
 	if err != nil {
 		return 0, nil, err
@@ -69,7 +78,7 @@ func (c *connection) readPacket() (packetID uint64, body *bytes.Reader, err erro
 	if err != nil {
 		return 0, nil, err
 	}
-	return id, p, nil
+	return int32(id), p, nil
 }
 
 type Player struct {
@@ -237,7 +246,8 @@ func (ms *MinecraftServer) handleLogin(c *connection) error {
 	if err != nil {
 		return fmt.Errorf("read ackID: %v", err)
 	}
-	if ackID != LoginSbLoginAcknowledged {
+
+	if ackID != sbLogin.LoginAcknowledged {
 		return fmt.Errorf("expected login ack, got: %v", ackID)
 	}
 	ms.Logger.Infow("Login ack", "name", name)
@@ -266,7 +276,7 @@ func (ms *MinecraftServer) parseLoginPacket(c *connection) (*string, *uuid.UUID,
 
 func (ms *MinecraftServer) sendLoginSuccessPacket(c *connection, username string, uuid uuid.UUID) error {
 	p := Packet{
-		PacketId: LoginCbLoginFinished,
+		PacketId: cbLogin.LoginFinished,
 	}
 	p.AppendUUID(uuid)
 	p.AppendString(username)
@@ -292,10 +302,10 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 		}
 
 		switch id {
-		case ConfigSbClientInformation, ConfigSbCustomPayload, ConfigSbKeepAlive:
+		case sbConfiguration.ClientInformation, sbConfiguration.CustomPayload, sbConfiguration.KeepAlive:
 			// Ignore packet for now
 			_ = r
-		case ConfigSbSelectKnownPacks:
+		case sbConfiguration.SelectKnownPacks:
 			if sentRegistries {
 				return fmt.Errorf("client sent Known Packs twice")
 			}
@@ -308,10 +318,11 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 			if err != nil {
 				return err
 			}
-			if err := c.writePacket(Packet{PacketId: ConfigCbFinishConfiguration, Data: nil}); err != nil {
+			if err := c.writePacket(Packet{PacketId: cbConfiguration.FinishConfiguration, Data: nil}); err != nil {
 				return err
+
 			}
-		case ConfigSbFinishConfiguration:
+		case sbConfiguration.FinishConfiguration:
 			ms.Logger.Infoln("configuration finished")
 			c.state = statePlay
 			return nil
@@ -323,7 +334,7 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 
 func (ms *MinecraftServer) sendKnowPacks(c *connection) error {
 	p := Packet{
-		PacketId: ConfigCbSelectKnownPacks,
+		PacketId: cbConfiguration.SelectKnownPacks,
 	}
 	p.AppendVarint(1)
 	p.AppendString("minecraft")
@@ -338,7 +349,7 @@ func (ms *MinecraftServer) sendKnowPacks(c *connection) error {
 func (ms *MinecraftServer) sendRegistries(c *connection) error {
 	for _, r := range ms.registries {
 		p := Packet{
-			PacketId: ConfigCbRegistryData,
+			PacketId: cbConfiguration.RegistryData,
 		}
 		p.AppendString(r.ID)
 		p.AppendVarint(int32(len(r.Entries)))
@@ -355,7 +366,7 @@ func (ms *MinecraftServer) sendRegistries(c *connection) error {
 
 func (ms *MinecraftServer) sendTags(c *connection) error {
 	p := Packet{
-		PacketId: ConfigCbUpdateTags,
+		PacketId: cbConfiguration.UpdateTags,
 	}
 	p.AppendVarint(int32(len(ms.tags)))
 	for _, r := range ms.tags {
@@ -404,7 +415,7 @@ func (ms *MinecraftServer) handlePlay(c *connection) error {
 const viewDistance = 2
 
 func (ms *MinecraftServer) sendChunks(c *connection, centerX, centerZ int32) error {
-	if err := c.writePacket(Packet{PacketId: PlayCbChunkBatchStart}); err != nil {
+	if err := c.writePacket(Packet{PacketId: cbPlay.ChunkBatchStart}); err != nil {
 		return fmt.Errorf("chunk batch start: %w", err)
 	}
 
@@ -418,7 +429,7 @@ func (ms *MinecraftServer) sendChunks(c *connection, centerX, centerZ int32) err
 		}
 	}
 
-	p := Packet{PacketId: PlayCbChunkBatchFinished}
+	p := Packet{PacketId: cbPlay.ChunkBatchFinished}
 	p.AppendVarint(count)
 	ms.Logger.Infow("sent chunk batch", "chunks", count)
 	return c.writePacket(p)
@@ -426,26 +437,26 @@ func (ms *MinecraftServer) sendChunks(c *connection, centerX, centerZ int32) err
 
 func (ms *MinecraftServer) sendLevelChunkWithLight(c *connection, chunkX, chunkZ int32) error {
 	p := Packet{
-		PacketId: PlayCbLevelChunkWithLight,
+		PacketId: cbPlay.LevelChunkWithLight,
 	}
+
 	p.AppendInt(chunkX) // Chunk X
 	p.AppendInt(chunkZ) // Chunk Z
 
 	p.AppendVarint(0) // Heightmaps
 
 	const floorSections = 4
-	const stoneStateID = 1
 	stone := ChunkSection{
 		BlockCount:  16 * 16 * 16,
 		FluidCount:  0,
-		BlockStates: PalettedContainer{BitsPerEntry: 0, Palette: stoneStateID},
+		BlockStates: PalettedContainer{BitsPerEntry: 0, Palette: blocks.Granite},
 		Biomes:      PalettedContainer{BitsPerEntry: 0, Palette: 0},
 	}
 
 	air := ChunkSection{
 		BlockCount:  0,
 		FluidCount:  0,
-		BlockStates: PalettedContainer{BitsPerEntry: 0, Palette: 0},
+		BlockStates: PalettedContainer{BitsPerEntry: 0, Palette: blocks.Air},
 		Biomes:      PalettedContainer{BitsPerEntry: 0, Palette: 0},
 	}
 
@@ -552,8 +563,9 @@ func (pc PalettedContainer) ToByte() []byte {
 
 func (ms *MinecraftServer) sendGameEvent(c *connection) error {
 	p := Packet{
-		PacketId: PlayCbGameEvent,
+		PacketId: cbPlay.GameEvent,
 	}
+
 	p.AppendByte(13)
 	p.AppendFloat(13)
 	return c.writePacket(p)
@@ -561,8 +573,9 @@ func (ms *MinecraftServer) sendGameEvent(c *connection) error {
 
 func (ms *MinecraftServer) sendSetChunkCacheCenter(c *connection) error {
 	p := Packet{
-		PacketId: PlayCbSetChunkCacheCenter,
+		PacketId: cbPlay.SetChunkCacheCenter,
 	}
+
 	p.AppendVarint(0)
 	p.AppendVarint(0)
 	return c.writePacket(p)
@@ -584,18 +597,19 @@ func (ms *MinecraftServer) playLoop(c *connection) error {
 		}
 
 		switch id {
-		case PlaySbKeepAlive:
+		case sbPlay.KeepAlive:
 			var token int64
 			if err := binary.Read(body, binary.BigEndian, &token); err != nil {
 				return fmt.Errorf("keep alive: %w", err)
 			}
-		case PlaySbAcceptTeleportation:
+		case sbPlay.AcceptTeleportation:
 			// Confirms a Teleport
-		case PlaySbMovePlayerPos, PlaySbMovePlayerPosRot,
-			PlaySbMovePlayerRot, PlaySbMovePlayerStatusOnly:
+			continue
+		case sbPlay.MovePlayerPos, sbPlay.MovePlayerPosRot,
+			sbPlay.MovePlayerRot, sbPlay.MovePlayerStatusOnly:
 			pos := c.player.Pos()
-			hasPos := id == PlaySbMovePlayerPos || id == PlaySbMovePlayerPosRot
-			hasRot := id == PlaySbMovePlayerPosRot || id == PlaySbMovePlayerRot
+			hasPos := id == sbPlay.MovePlayerPos || id == sbPlay.MovePlayerPosRot
+			hasRot := id == sbPlay.MovePlayerPosRot || id == sbPlay.MovePlayerRot
 			if err := readMovement(body, &pos, hasPos, hasRot); err != nil {
 				ms.Logger.Errorw("movement",
 					"id", fmt.Sprintf("0x%02X", id), "err", err)
@@ -609,9 +623,9 @@ func (ms *MinecraftServer) playLoop(c *connection) error {
 					return fmt.Errorf("rubber-band: %w", err)
 				}
 			}
-		case PlaySbClientTickEnd:
+		case sbPlay.ClientTickEnd:
 			continue
-		case PlaySbUseItemOn, PlaySbUseItem:
+		case sbPlay.UseItemOn, sbPlay.UseItem:
 			if err := ms.fireOnUseItem(c.player); err != nil {
 				ms.Logger.Debugw("failed to use item", "name", c.player.name, "err", err)
 			}
@@ -652,7 +666,7 @@ func (ms *MinecraftServer) sendKeepAlives(c *connection, stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-t.C:
-			p := Packet{PacketId: PlayCbKeepAlive}
+			p := Packet{PacketId: cbPlay.KeepAlive}
 			p.AppendLong(time.Now().UnixMilli())
 			if err := c.writePacket(p); err != nil {
 				ms.Logger.Errorw("keep alive failed", "err", err)
@@ -664,7 +678,7 @@ func (ms *MinecraftServer) sendKeepAlives(c *connection, stop <-chan struct{}) {
 
 func (ms *MinecraftServer) sendLogin(c *connection) error {
 	p := Packet{
-		PacketId: PlayCbLogin,
+		PacketId: cbPlay.Login,
 	}
 	p.AppendInt(c.player.EntityID)                       // Entity ID
 	p.AppendBool(false)                                  // Is hardcore
@@ -706,7 +720,7 @@ const (
 )
 
 func (ms *MinecraftServer) sendPlayerPosition(c *connection) error {
-	p := Packet{PacketId: PlayCbPlayerPosition}
+	p := Packet{PacketId: cbPlay.PlayerPosition}
 	p.AppendVarint(0) // Teleport ID
 	p.AppendDouble(0) // X
 	p.AppendDouble(0) // Y
@@ -726,7 +740,7 @@ func (ms *MinecraftServer) readAcceptTeleportation(c *connection) error {
 		if err != nil {
 			return fmt.Errorf("read packet: %w", err)
 		}
-		if packetID != PlaySbAcceptTeleportation {
+		if packetID != sbPlay.AcceptTeleportation {
 			ms.Logger.Debugw("waiting for teleport confirm, skipping packet",
 				"id", fmt.Sprintf("0x%02X", packetID))
 			continue
@@ -781,7 +795,7 @@ const (
 func (ms *MinecraftServer) sendPlayerInfoUpdate(c *connection) error {
 	actions := AddPlayer | UpdateGameMode | UpdateListed | UpdateLatency
 
-	p := Packet{PacketId: PlayCbPlayerInfoUpdate}
+	p := Packet{PacketId: cbPlay.PlayerInfoUpdate}
 	p.AppendByte(byte(actions))
 	p.AppendVarint(1) // Number of entries
 
@@ -812,27 +826,27 @@ func (ms *MinecraftServer) handleStatus(c *connection) {
 		}
 		switch packetID {
 
-		case StatusSbStatusRequest:
+		case sbStatus.StatusRequest:
 			status := fmt.Sprintf(`{
 				"version": {"name": "26.2", "protocol": 776},
 				"players": {"max": %v, "online": %v},
 				"description": {"text": "Hello from Go!"}
 			}`, len(ms.players)+1, len(ms.players))
 			packet := Packet{
-				PacketId: StatusCbStatusResponse,
+				PacketId: cbStatus.StatusResponse,
 			}
 			packet.AppendString(status)
 			if err := c.writePacket(packet); err != nil {
 				return
 			}
 
-		case StatusSbPingRequest:
+		case sbStatus.PingRequest:
 			var nonce int64
 			if err := binary.Read(p, binary.BigEndian, &nonce); err != nil {
 				return
 			}
 			packet := Packet{
-				PacketId: StatusCbPongResponse,
+				PacketId: cbStatus.PongResponse,
 			}
 			packet.AppendLong(nonce)
 			if err := c.writePacket(packet); err != nil {

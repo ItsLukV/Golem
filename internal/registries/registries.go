@@ -2,12 +2,13 @@ package registries
 
 import (
 	"bytes"
-	"embed"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"path"
 	"strings"
+
+	"github.com/itslukv/minecraftserver/data"
 )
 
 var SyncedRegistries = []string{
@@ -20,9 +21,6 @@ var SyncedRegistries = []string{
 	"pig_sound_variant", "wolf_variant", "wolf_sound_variant",
 	"zombie_nautilus_variant",
 }
-
-//go:embed minecraft
-var files embed.FS
 
 type Entry struct {
 	ID   string
@@ -40,14 +38,14 @@ func LoadRegistries() ([]Registry, error) {
 		root := path.Join("minecraft", name)
 		reg := Registry{ID: "minecraft:" + name}
 
-		err := fs.WalkDir(files, root, func(p string, d fs.DirEntry, err error) error {
+		err := fs.WalkDir(data.FS, root, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
 			if d.IsDir() || path.Ext(p) != ".json" {
 				return nil
 			}
-			raw, err := files.ReadFile(p)
+			raw, err := data.FS.ReadFile(p)
 			if err != nil {
 				return err
 			}
