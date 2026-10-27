@@ -13,7 +13,7 @@
       in
       {
         packages.default = pkgs.buildGoModule {
-          pname = "minecraftserver";
+          pname = "golem";
           version = "0.1.0";
           src = ./.;
           vendorHash = "sha256-Q2QH7qLz13nxSuyfMtpdnc3OIhwU599b4kOSbp821Wo=";

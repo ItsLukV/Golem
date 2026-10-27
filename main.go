@@ -1,4 +1,3 @@
-//go:generate go run ./internal/gen
 package main
 
 import (
@@ -6,8 +5,8 @@ import (
 	"math"
 	"net"
 
-	server "github.com/itslukv/minecraftserver/internal"
-	reg "github.com/itslukv/minecraftserver/internal/registries"
+	"github.com/itslukv/minecraftserver/internal/registry"
+	"github.com/itslukv/minecraftserver/server"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -31,12 +30,12 @@ func main() {
 
 	logger := newLogger()
 
-	registries, err := reg.LoadRegistries()
+	registries, err := registry.LoadRegistries()
 	if err != nil {
 		logger.Fatal(err)
 	}
 
-	tags, err := reg.LoadTags(registries)
+	tags, err := registry.LoadTags(registries)
 	if err != nil {
 		logger.Fatal(err)
 	}
