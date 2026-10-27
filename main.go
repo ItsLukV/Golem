@@ -68,6 +68,11 @@ func main() {
 		return nil
 	})
 
+	ms.OnPlayerInput(func(p *server.Player, it []server.InputType) error {
+		logger.Infof("Player Input: %v", it)
+		return nil
+	})
+
 	logger.Infoln("Server listening on :25565")
 	for {
 		conn, err := listener.Accept()

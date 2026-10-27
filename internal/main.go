@@ -108,11 +108,12 @@ type MinecraftServer struct {
 	players map[uuid.UUID]*Player
 	nextEID atomic.Int32
 
-	hmu       sync.RWMutex
-	onJoin    []func(*Player) error
-	onMove    []func(*Player, PlayerPos) error
-	onLeave   []func(*Player)
-	onUseItem []func(*Player) error
+	hmu           sync.RWMutex
+	onJoin        []func(*Player) error
+	onMove        []func(*Player, PlayerPos) error
+	onLeave       []func(*Player)
+	onUseItem     []func(*Player) error
+	onPlayerInput []func(*Player, []InputType) error
 }
 
 func (ms *MinecraftServer) registerPlayer(c *connection, name string, id uuid.UUID) *Player {
@@ -623,6 +624,14 @@ func (ms *MinecraftServer) playLoop(c *connection) error {
 					return fmt.Errorf("rubber-band: %w", err)
 				}
 			}
+		case sbPlay.PlayerInput:
+			flags_raw, err := body.ReadByte()
+			if err != nil {
+				return err
+			}
+			flags := InputType(flags_raw)
+			ms.fireOnPlayerInput(c.player, flags.Flags())
+			continue
 		case sbPlay.ClientTickEnd:
 			continue
 		case sbPlay.UseItemOn, sbPlay.UseItem:
