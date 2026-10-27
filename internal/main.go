@@ -290,6 +290,9 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 	if c.state != stateConfiguration {
 		return fmt.Errorf("wrong state, expected configuration, got %s", c.state)
 	}
+	if err := ms.sendBrand(c); err != nil {
+		return fmt.Errorf("send brand: %w", err)
+	}
 	err := ms.sendKnowPacks(c)
 	if err != nil {
 		return fmt.Errorf("send know pack: %w", err)
@@ -331,6 +334,17 @@ func (ms *MinecraftServer) handleConfiguration(c *connection) error {
 			return fmt.Errorf("unexpected configuration packet 0x%02X", id)
 		}
 	}
+}
+
+const serverBrand = "Golem"
+
+func (ms *MinecraftServer) sendBrand(c *connection) error {
+	p := Packet{
+		PacketId: cbConfiguration.CustomPayload,
+	}
+	p.AppendString("minecraft:brand")
+	p.AppendString(serverBrand)
+	return c.writePacket(p)
 }
 
 func (ms *MinecraftServer) sendKnowPacks(c *connection) error {
